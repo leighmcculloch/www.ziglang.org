@@ -5,7 +5,8 @@ const usage =
     \\usage: zashi serve [options]
     \\
     \\options:
-    \\    -p [port]        set the port number to listen on
+    \\      -p [port]        set the port number to listen on
+    \\      --root [path]    directory of static files to serve
     \\
 ;
 
@@ -35,9 +36,8 @@ fn fatal(comptime format: []const u8, args: anytype) noreturn {
 }
 
 fn cmdServe(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
-    _ = arena;
-
     var listen_port: u16 = 0;
+    var opt_root_dir_path: ?[]const u8 = null;
 
     {
         var i: usize = 0;
@@ -49,8 +49,40 @@ fn cmdServe(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
                 listen_port = std.fmt.parseInt(u16, args[i], 10) catch |err| {
                     fatal("unable to parse port '{s}': {s}", .{ args[i], @errorName(err) });
                 };
+            } else if (std.mem.eql(u8, arg, "--root")) {
+                i += 1;
+                if (i >= args.len) fatal("expected arg after '{s}'", .{arg});
+                opt_root_dir_path = args[i];
             } else {
                 fatal("unrecognized arg: '{s}'", .{arg});
+            }
+        }
+    }
+
+    const root_dir_path = opt_root_dir_path orelse ".";
+    var root_dir: std.fs.IterableDir = std.fs.cwd().openIterableDir(root_dir_path, .{}) catch |e|
+        fatal("unable to open directory '{s}': {s}", .{ root_dir_path, @errorName(e) });
+    defer root_dir.close();
+
+    // maps file path to contents
+    var files = std.StringHashMap([]u8).init(gpa);
+    defer files.deinit();
+
+    {
+        var it = try root_dir.walk(arena);
+        defer it.deinit();
+
+        while (try it.next()) |entry| {
+            switch (entry.kind) {
+                .file => {
+                    const max_size = 100 * 1024 * 1024;
+                    const bytes = root_dir.dir.readFileAlloc(arena, entry.path, max_size) catch |err| {
+                        fatal("unable to read '{s}': {s}", .{ entry.path, @errorName(err) });
+                    };
+                    const sub_path = try arena.dupe(u8, entry.path);
+                    try files.put(sub_path, bytes);
+                },
+                else => continue,
             }
         }
     }
