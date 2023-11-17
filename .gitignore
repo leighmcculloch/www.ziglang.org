@@ -1,4 +1,1 @@
-zig-cache
-/resources
-doctest-*
-/public
+/zig-cache

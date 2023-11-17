@@ -14,7 +14,7 @@ Translations rely on three main conventions:
 
 1. The presence of the corresponding language in `config.zon`
 2. The `themes/ziglang-original/i18n` directory, which contains translations
-   for menu elements, the download page and a few other miscelanneous strings.
+   for menu elements, the download page and a few other miscellaneous strings.
 3. In `content/`, the presence of markdown files for the specific language
    you're translating to.
 
