@@ -1,5 +1,9 @@
 const std = @import("std");
+const fs = std.fs;
+const mime = @import("mime");
 const Allocator = std.mem.Allocator;
+const not_found_html = @embedFile("404.html");
+const assert = std.debug.assert;
 
 const usage =
     \\usage: zashi serve [options]
@@ -11,6 +15,51 @@ const usage =
 ;
 
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+
+const File = struct {
+    mime_type: mime.Type,
+    contents: []u8,
+};
+
+const Server = struct {
+    /// The key is file path.
+    files: std.StringHashMap(File),
+    http_server: std.http.Server,
+
+    fn deinit(s: *Server) void {
+        s.files.deinit();
+        s.http_server.deinit();
+        s.* = undefined;
+    }
+
+    fn handleRequest(s: *Server, res: *std.http.Server.Response) !void {
+        //var request_buffer: [8 * 1024]u8 = undefined;
+        //const n = try res.readAll(&request_buffer);
+        //const request_body = request_buffer[0..n];
+        //_ = request_body;
+        //std.debug.print("request_body:\n{s}\n", .{request_body});
+
+        const path = res.request.target;
+        const file = s.files.get(path) orelse {
+            res.status = .not_found;
+            res.transfer_encoding = .{ .content_length = not_found_html.len };
+            try res.headers.append("content-type", "text/html");
+            try res.headers.append("connection", "close");
+            try res.send();
+            _ = try res.writer().writeAll(not_found_html);
+            try res.finish();
+            return;
+        };
+
+        res.transfer_encoding = .{ .content_length = file.contents.len };
+        try res.headers.append("content-type", @tagName(file.mime_type));
+        try res.headers.append("connection", "close");
+        try res.send();
+
+        _ = try res.writer().writeAll(file.contents);
+        try res.finish();
+    }
+};
 
 pub fn main() !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -60,13 +109,17 @@ fn cmdServe(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     }
 
     const root_dir_path = opt_root_dir_path orelse ".";
-    var root_dir: std.fs.IterableDir = std.fs.cwd().openIterableDir(root_dir_path, .{}) catch |e|
+    var root_dir: fs.IterableDir = fs.cwd().openIterableDir(root_dir_path, .{}) catch |e|
         fatal("unable to open directory '{s}': {s}", .{ root_dir_path, @errorName(e) });
     defer root_dir.close();
 
-    // maps file path to contents
-    var files = std.StringHashMap([]u8).init(gpa);
-    defer files.deinit();
+    var server: Server = .{
+        .files = std.StringHashMap(File).init(gpa),
+        .http_server = std.http.Server.init(gpa, .{
+            .reuse_address = true,
+        }),
+    };
+    defer server.deinit();
 
     {
         var it = try root_dir.walk(arena);
@@ -75,33 +128,40 @@ fn cmdServe(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         while (try it.next()) |entry| {
             switch (entry.kind) {
                 .file => {
-                    const max_size = 100 * 1024 * 1024;
+                    const max_size = std.math.maxInt(u32);
                     const bytes = root_dir.dir.readFileAlloc(arena, entry.path, max_size) catch |err| {
                         fatal("unable to read '{s}': {s}", .{ entry.path, @errorName(err) });
                     };
-                    const sub_path = try arena.dupe(u8, entry.path);
-                    try files.put(sub_path, bytes);
+                    const sub_path = try normalizePathAlloc(arena, entry.path);
+                    const ext = fs.path.extension(sub_path);
+                    const file: File = .{
+                        .mime_type = mime.extension_map.get(ext) orelse
+                            .@"application/octet-stream",
+                        .contents = bytes,
+                    };
+                    try server.files.put(sub_path, file);
+                    if (std.mem.eql(u8, entry.basename, "index.html")) {
+                        // Add an alias
+                        try server.files.put(fs.path.dirname(sub_path) orelse "/", file);
+                    }
                 },
                 else => continue,
             }
         }
     }
 
-    var server = std.http.Server.init(gpa, .{});
-    defer server.deinit();
-
     const address = try std.net.Address.parseIp("127.0.0.1", listen_port);
-    try server.listen(address);
-    const server_port = server.socket.listen_address.in.getPort();
+    try server.http_server.listen(address);
+    const server_port = server.http_server.socket.listen_address.in.getPort();
     std.debug.print("Listening at http://127.0.0.1:{d}/\n", .{server_port});
 
     try serve(gpa, &server);
 }
 
-fn serve(gpa: Allocator, s: *std.http.Server) !void {
+fn serve(gpa: Allocator, s: *Server) !void {
     var header_buffer: [1024]u8 = undefined;
     accept: while (true) {
-        var res = try s.accept(.{
+        var res = try s.http_server.accept(.{
             .allocator = gpa,
             .header_strategy = .{ .static = &header_buffer },
         });
@@ -113,23 +173,28 @@ fn serve(gpa: Allocator, s: *std.http.Server) !void {
                 error.EndOfStream => continue,
                 else => return err,
             };
-            try handleRequest(&res);
+            s.handleRequest(&res) catch |err| {
+                std.log.err("failed request: {s}", .{@errorName(err)});
+                continue :accept;
+            };
         }
     }
 }
 
-fn handleRequest(res: *std.http.Server.Response) !void {
-    const server_body: []const u8 = "message from server!\n";
-    res.transfer_encoding = .{ .content_length = server_body.len };
-    try res.headers.append("content-type", "text/plain");
-    try res.headers.append("connection", "close");
-    try res.send();
+/// Make a file system path identical independently of operating system path inconsistencies.
+/// This converts backslashes into forward slashes.
+fn normalizePathAlloc(arena: Allocator, fs_path: []const u8) ![]const u8 {
+    const new_buffer = try arena.alloc(u8, fs_path.len + 1);
+    new_buffer[0] = canonical_sep;
+    @memcpy(new_buffer[1..], fs_path);
+    if (fs.path.sep != canonical_sep)
+        normalizePath(new_buffer);
+    return new_buffer;
+}
 
-    var request_buffer: [8 * 1024]u8 = undefined;
-    const n = try res.readAll(&request_buffer);
-    const request_body = request_buffer[0..n];
-    std.debug.print("request_body:\n{s}\n", .{request_body});
+const canonical_sep = fs.path.sep_posix;
 
-    _ = try res.writer().writeAll(server_body);
-    try res.finish();
+fn normalizePath(bytes: []u8) void {
+    assert(fs.path.sep != canonical_sep);
+    std.mem.replaceScalar(u8, bytes, fs.path.sep, canonical_sep);
 }
