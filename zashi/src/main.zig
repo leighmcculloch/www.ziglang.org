@@ -142,7 +142,7 @@ fn cmdServe(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
                     try server.files.put(sub_path, file);
                     if (std.mem.eql(u8, entry.basename, "index.html")) {
                         // Add an alias
-                        try server.files.put(fs.path.dirname(sub_path) orelse "/", file);
+                        try server.files.put(dirNameWithSlash(sub_path), file);
                     }
                 },
                 else => continue,
@@ -197,4 +197,13 @@ const canonical_sep = fs.path.sep_posix;
 fn normalizePath(bytes: []u8) void {
     assert(fs.path.sep != canonical_sep);
     std.mem.replaceScalar(u8, bytes, fs.path.sep, canonical_sep);
+}
+
+/// like fs.path.dirname but ensures a final `/`
+fn dirNameWithSlash(path: []const u8) []const u8 {
+    if (fs.path.dirname(path)) |d| {
+        return path[0 .. d.len + 1];
+    } else {
+        return "/";
+    }
 }

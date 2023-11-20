@@ -96,13 +96,8 @@ fn addMarkdownRender(
     md_basename: []const u8,
 ) void {
     const in_path = b.pathJoin(&.{ content_dir_path, path, md_basename });
-    const out_basename = b.fmt("{s}.html", .{md_basename[0 .. md_basename.len - 3]});
-    const out_path = b.pathJoin(&.{ path, out_basename });
-    std.debug.print("md_renderer {s} {s}\n(output: {s})\n\n", .{
-        in_path,
-        out_basename,
-        out_path,
-    });
+    const out_basename = md_basename[0 .. md_basename.len - 3];
+    const out_path = b.pathJoin(&.{ path, out_basename, "index.html" });
 
     const render_step = b.addRunArtifact(zashi.builder.dependency("markdown-renderer", .{}).artifact("markdown-renderer"));
     render_step.addFileArg(.{ .path = in_path });
