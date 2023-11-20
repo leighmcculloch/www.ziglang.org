@@ -41,14 +41,26 @@ const Server = struct {
 
         const path = res.request.target;
         const file = s.files.get(path) orelse {
-            res.status = .not_found;
-            res.transfer_encoding = .{ .content_length = not_found_html.len };
-            try res.headers.append("content-type", "text/html");
-            try res.headers.append("connection", "close");
-            try res.send();
-            _ = try res.writer().writeAll(not_found_html);
-            try res.finish();
-            return;
+            if (std.mem.endsWith(u8, path, "/")) {
+                res.status = .not_found;
+                res.transfer_encoding = .{ .content_length = not_found_html.len };
+                try res.headers.append("content-type", "text/html");
+                try res.headers.append("connection", "close");
+                try res.send();
+                _ = try res.writer().writeAll(not_found_html);
+                try res.finish();
+                return;
+            } else {
+                // redirects from `/path` to `/path/`
+                const ally = general_purpose_allocator.allocator();
+                const location = try std.fmt.allocPrint(ally, "{s}/", .{path});
+                defer ally.free(location);
+                res.status = .see_other;
+                try res.headers.append("location", location);
+                try res.send();
+                try res.finish();
+                return;
+            }
         };
 
         res.transfer_encoding = .{ .content_length = file.contents.len };
